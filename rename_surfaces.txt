@@ -1,0 +1,10 @@
+existing_value:updated_value
+Sand:S
+Gravel:CSG
+Grass:G
+Dirt/Sand:U
+Loose Aggregate:CSG
+Aggregate:CSG
+Natural:D
+Dirt:D
+Paved:P

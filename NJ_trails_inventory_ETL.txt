@@ -1,0 +1,198 @@
+#Import libraries
+import psycopg2
+import config
+import geopandas as gpd 
+import os
+import sqlalchemy as sa
+import pandas as pd
+import shapely
+import fiona
+
+def create_tables():
+    """ create destination tables in the PostGIS database"""
+    sql_commands = (
+        """
+DROP TABLE IF EXISTS trails CASCADE;
+DROP TABLE IF EXISTS owners CASCADE;
+DROP TABLE IF EXISTS counties CASCADE;
+DROP TABLE IF EXISTS surface_types CASCADE;
+        """,
+        """
+    CREATE TABLE "surface_types" (
+        "surface_type" varchar,
+        "description" varchar,
+        PRIMARY KEY ("surface_type")
+)
+        """,
+        """ 
+    INSERT INTO surface_types(surface_type, description)
+        VALUES
+        ('CSG', 'Crushed Stone/Gravel'),
+        ('D', 'Dirt'),
+        ('G', 'Grass'),
+        ('P', 'Paved'),
+        ('SD', 'Stone Dust'),
+        ('S', 'Sand/Sandy Soil'),
+        ('U', 'Unknown'),
+        ('V', 'Varies')
+        """,
+
+        """
+    CREATE TABLE "counties" (
+        "county_code" int,
+        "county" varchar,
+        PRIMARY KEY ("county_code")
+)
+        """,
+        """
+    INSERT INTO counties(county_code, county)
+        VALUES
+        ('42017','Bucks'),
+        ('34005','Burlington'),
+        ('34007','Camden'),
+        ('42029','Chester'),
+        ('42045','Delaware'),
+        ('34015','Gloucester'),
+        ('34021','Mercer'),
+        ('42091','Montgomery'),
+        ('42101','Philadelphia')
+        """,
+        """
+    CREATE TABLE "trails" (
+        "trail_id" serial,
+        "trail_name" varchar,
+        "county_code" int references counties(county_code),
+        "owner" varchar,
+        "surface_type" varchar references surface_types(surface_type),
+        "multi_use" boolean,
+        "verif_status" varchar,
+        "verif_by" varchar,
+        "verif_date" date,
+        "comments" text,
+        "geom" geometry (MULTILINESTRING,26918),
+        PRIMARY KEY ("trail_id")
+)
+        """)
+    # connect to the PostgreSQL server -- edit this to run against ESRI versioned DB
+    db_conn= psycopg2.connect(database="NJ_trails_inventory", user='postgres', 
+                          password='password', host='localhost', port= '5432')
+    cur = db_conn.cursor()
+    # create table one by one
+    for command in sql_commands:
+        cur.execute(command)
+    # close communication with the PostgreSQL database server
+    cur.close()
+    # commit the changes
+    db_conn.commit()
+    # close connection
+    db_conn.close()
+
+#Call function
+create_tables()
+
+#--Read single shapefile in working folder--
+# Define path to folder
+input_folder = r"U:/_OngoingProjects/Trails/NJ_Trails_Inventory/shapefiles" #Edit project folder here
+
+# Join folder path and file name
+file_path = os.path.join(input_folder, "burlington_trails.shp") #Edit file name here
+
+# Print out the full file path  
+print(file_path)
+
+#Read file
+in_file = gpd.read_file(file_path)
+
+#Read shapefile zip folder in working directory
+zip_file = "zip://U:/_OngoingProjects/Trails/NJ_Trails_Inventory/shapefiles/Mercer_Trails.zip!Mercer_Trails_ALL.shp" 
+
+#Read file
+in_file = gpd.read_file(zip_file)
+
+#Read file from a URL 
+url = "https://opendata.arcgis.com/datasets/f866ab117bb64288a7de0b07c206cc70_63.geojson"
+in_file = gpd.read_file(url)
+
+#Check data type -- should be GeoDataFrame if loaded properly
+type(in_file)
+
+#Check CRS
+in_file.crs
+
+#Inspect the input file
+in_file.head()
+
+#Check geometry column of input file
+in_file.geometry.name #returns the name of the column where geometry is stored
+in_file.geometry.type #returns the geometry type
+
+#Check column names
+in_file.columns
+
+#Rename columns
+def rename_cols():
+    rename_cols = {}
+    dict_file = open("rename_cols.txt") 
+    next(dict_file)
+    for line in dict_file:
+        key, value = line.split()
+        rename_cols[key] = value
+        in_file.rename(columns=rename_cols, inplace=True)
+    return in_file
+rename_cols()
+
+#Drop unwanted columns 
+keep_cols = ['trail_name','surface_type','geom','verif_status',
+                              'verif_by','verif_date','comments','multi_use','county_code']
+out_file=in_file.drop(in_file.columns.difference(keep_cols), 1, inplace=True)
+
+#Create new columns & assign county code
+in_file=in_file.assign(verif_status='', verif_by='', verif_date='', comments='',
+                      multi_use='', county_code='34005')
+
+#Get list of distinct surface types
+in_file['surface_type'].unique()
+
+#Replace existing surface type values with desired values
+def replace_surface_values():
+    rename_surfaces = {}
+    dict_file = open("rename_surfaces.txt")
+    next(dict_file)
+    for line in dict_file:
+        key, value = line.split(":")
+        rename_surfaces[key] = value.rstrip()
+        in_file.replace(rename_surfaces, inplace=True)
+    return in_file
+replace_surface_values()
+
+#Drop duplicates based on geometry column
+in_file.drop_duplicates(subset=['geom'])
+
+#Reset geometry column 
+in_file = in_file.set_geometry('geom')
+
+#Check for missing/empty geometries
+in_file['geom'].is_empty
+in_file['geom'].isna
+
+#Filter out missing/empty geoms
+in_file = in_file[~(in_file['geom'].is_empty | in_file['geom'].isna())]
+
+#Convert LineString geometries to MultiLineString
+from shapely.geometry import LineString
+from shapely.geometry import MultiLineString
+in_file["geom"] = [MultiLineString([feature]) if type(feature) == LineString \
+    else feature for feature in in_file["geom"]]
+	
+#Check for 3D geometries
+in_file.has_z
+
+in_file["geom"]=in_file["geom"].apply(lambda geom:shapely.wkb.loads(shapely.wkb.dumps(geom, output_dimension=2)))
+
+#Reproject to NAD83 Zone 18N
+out_file=in_file.to_crs("EPSG:26918")
+
+#Write gpd dataframe to PostGIS DB
+db_conn= "postgres://postgres:password@localhost:5432/NJ_trails_inventory";
+engine = sa.create_engine(db_conn)
+out_file.to_postgis("trails", con=engine, if_exists='append')

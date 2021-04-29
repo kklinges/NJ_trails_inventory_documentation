@@ -1,0 +1,5 @@
+#old_name	#updated_name
+TRAIL_NAME	trail_name
+TRL_SRFACE	surface_type
+OWNERSHIP	owner
+geometry	geom
